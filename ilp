@@ -1,0 +1,195 @@
+import pulp
+import numpy as np
+import plotly.graph_objects as go
+import os
+from collections import defaultdict
+import plotly.express as px
+from plotly.subplots import make_subplots
+import plotly.io as pio
+
+# Set default theme to dark
+pio.templates.default = "plotly_dark"
+
+# ---------- Input ----------
+input_data = {
+    # "groups": [
+    #     [1]*7 + [2]*6,
+    #     [5]*6 + [6]*5,
+    #     [9]*7 + [10]*6,
+    #     [3]*5 + [4]*5,
+    #     [6]*5 + [7]*6,
+    #     [8]*4 + [9]*3,
+    #     [2]*6 + [3]*5,
+    #     [4]*6 + [5]*5,
+    #     [6]*5 + [7]*4,
+    #     [1]*5 + [3]*5,
+    #     [4]*4 + [6]*6,
+    # ],
+    # "bin_capacity": 300
+
+
+    "groups": [
+        [2,2,3,3],
+        [1,1,2,2],
+        [6,6,7,7],
+        [8,8,9,9],
+        [10,10,11,11],
+        [3,3,3,4],
+    ],
+    "bin_capacity": 15
+
+}
+
+# ---------- Prepare items ----------
+all_items = []
+group_id = 0
+for group in input_data["groups"]:
+    for size in group:
+        all_items.append((len(all_items), size, group_id))  # (item_id, size, group_id)
+    group_id += 1
+
+num_items = len(all_items)
+max_bins = num_items
+group_count = group_id
+
+# ---------- ILP Model ----------
+prob = pulp.LpProblem("BinPackingWithGroups", pulp.LpMinimize)
+
+x = pulp.LpVariable.dicts("x", ((i, j) for i in range(num_items) for j in range(max_bins)), lowBound=0, upBound=1)
+y = pulp.LpVariable.dicts("y", (j for j in range(max_bins)), lowBound=0, upBound=1)
+
+# Objective
+prob += pulp.lpSum([y[j] for j in range(max_bins)])
+
+# Constraints
+for i in range(num_items):
+    prob += pulp.lpSum([x[i, j] for j in range(max_bins)]) == 1
+
+for j in range(max_bins):
+    prob += pulp.lpSum([x[i, j] * all_items[i][1] for i in range(num_items)]) <= input_data["bin_capacity"] * y[j]
+
+group_to_items = defaultdict(list)
+for i, (_, _, g) in enumerate(all_items):
+    group_to_items[g].append(i)
+
+for g, items in group_to_items.items():
+    for j in range(max_bins):
+        prob += pulp.lpSum([x[i, j] for i in items]) <= 1
+
+# ---------- Visualization ----------
+def plot_frame(x_vars, y_vars, all_items, group_count, step, folder="frames_plotly_dark"):
+    import plotly.io as pio
+    os.makedirs(folder, exist_ok=True)
+    bin_capacity = input_data["bin_capacity"]
+    color_scale = px.colors.qualitative.Dark24
+
+    # LEFT: Fixed bins (even if empty)
+    bin_fig = go.Figure()
+    for j in range(max_bins):
+        y_pos = 0
+        bin_empty = True
+        for i in range(num_items):
+            if pulp.value(x_vars[i, j]) > 0.5:
+                bin_empty = False
+                size, group = all_items[i][1], all_items[i][2]
+                bin_fig.add_trace(go.Bar(
+                    x=[j],
+                    y=[size],
+                    base=[y_pos],
+                    marker=dict(color=color_scale[group % len(color_scale)]),
+                    name=f"Item {i} (G{group})",
+                    hovertemplate=f"Item {i}<br>Size: {size}<br>Group: {group}<extra></extra>",
+                    width=0.9,
+                    showlegend=False
+                ))
+                y_pos += size
+        # Add invisible zero-height bar for empty bins
+        if bin_empty:
+            bin_fig.add_trace(go.Bar(
+                x=[j],
+                y=[0.01],
+                base=[0],
+                marker=dict(color="gray"),
+                hoverinfo="skip",
+                width=0.9,
+                showlegend=False,
+                opacity=0.1
+            ))
+
+    bin_fig.update_layout(
+        barmode='stack',
+        yaxis=dict(title='Capacity', range=[0, bin_capacity]),
+        xaxis=dict(
+            title='Bin Index',
+            tickmode='linear',
+            dtick=1,
+            range=[-0.5, max_bins - 0.5]  # fixed width
+        ),
+        height=900,
+        width=1000,
+        margin=dict(l=20, r=20, t=30, b=20),
+        bargap=0.05,
+        title=f"Bin Packing - Step {step}"
+    )
+
+    # RIGHT: x_ij matrix with fixed bins on x-axis
+    matrix = np.zeros((num_items, max_bins))
+    for (i, j), var in x_vars.items():
+        matrix[i, j] = pulp.value(var)
+
+    heatmap = go.Heatmap(
+        z=matrix,
+        colorscale=[[0.0, "black"], [1.0, "red"]],  # custom binary colorscale
+        zmin=0,
+        zmax=1,
+        showscale=False
+    )
+
+    matrix_fig = go.Figure(data=[heatmap])
+    matrix_fig.update_layout(
+        title="x_ij Matrix (Item i vs Bin j)",
+        xaxis_title="Bin Index",
+        yaxis_title="Item Index",
+        yaxis=dict(scaleanchor="x", scaleratio=1),
+        xaxis=dict(tickmode='linear', dtick=1),
+        height=900,
+        width=1000,
+        margin=dict(l=20, r=20, t=30, b=20)
+    )
+
+    # Combine both
+    combined = make_subplots(rows=1, cols=2, column_widths=[0.5, 0.5], subplot_titles=("Bins", "Assignment Matrix"))
+    for trace in bin_fig.data:
+        combined.add_trace(trace, row=1, col=1)
+    for trace in matrix_fig.data:
+        combined.add_trace(trace, row=1, col=2)
+
+    combined.update_layout(
+        height=1000,
+        width=2000,
+        title_text=f"Bin Packing Visualization - Step {step}",
+        template="plotly_dark"
+    )
+
+    pio.write_image(combined, f"{folder}/frame_{step:03}.png")
+
+
+# ---------- Simulated ILP Steps ----------
+step = 0
+solver = pulp.PULP_CBC_CMD(msg=0)
+
+while True:
+    prob.solve(solver)
+    plot_frame(x, y, all_items, group_count, step)
+    step += 1
+
+    fractional = [(i, j) for (i, j), var in x.items() if 0.01 < pulp.value(var) < 0.99]
+    if not fractional:
+        break
+    i, j = min(fractional, key=lambda ij: abs(0.5 - pulp.value(x[ij])))
+    prob += x[i, j] == 1  # Fix one fractional var to 1
+
+# Final frame
+plot_frame(x, y, all_items, group_count, step)
+
+print(f"Saved {step + 1} image frames in 'frames_plotly_dark/'")
