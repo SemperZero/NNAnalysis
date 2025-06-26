@@ -1,0 +1,287 @@
+import random
+from ortools.linear_solver import pywraplp
+from ortools.sat.python import cp_model
+#from pulp import LpProblem, LpVariable, lpSum, LpMinimize, LpStatusOptimal, value, PULP_CBC_CMD
+import multiprocessing
+import time
+import pandas as pd
+
+
+# max workloads 350 (typically 200)
+# max vms per group: 15 (around 8 to 10 typically) .. or max 6
+# max ndoes 8
+# capcaity 10 to 48, typically 32
+
+
+
+
+class TimeoutException(Exception):
+    pass
+
+def _target_func(queue, func, args, kwargs):
+    try:
+        result = func(*args, **kwargs)
+        queue.put((True, result))
+    except Exception as e:
+        queue.put((False, e))
+
+def run_with_timeout(func, args=(), kwargs={}, timeout=10):
+    queue = multiprocessing.Queue()
+    process = multiprocessing.Process(target=_target_func, args=(queue, func, args, kwargs))
+    process.start()
+    process.join(timeout)
+
+    if process.is_alive():
+        process.terminate()
+        process.join()
+        return None, f"Timed out after {timeout}s"
+    else:
+        if not queue.empty():
+            success, result = queue.get()
+            return (result, None) if success else (None, f"Exception: {result}")
+        else:
+            return None, "No result returned"
+        
+def solve_bin_packing_ilp(item_groups, bin_capacity):
+    # Flatten items: (value, group_id)
+    items = []
+    for group_id, group in enumerate(item_groups):
+        for item in group:
+            items.append((item, group_id))
+
+    num_items = len(items)
+    max_bins = num_items
+
+    solver = pywraplp.Solver.CreateSolver('SCIP')
+    if not solver:
+        raise Exception("Solver not available")
+
+    x = {}
+    y = {}
+    for i in range(num_items):
+        for j in range(max_bins):
+            x[i, j] = solver.IntVar(0, 1, f'x_{i}_{j}')
+    for j in range(max_bins):
+        y[j] = solver.IntVar(0, 1, f'y_{j}')
+
+    # Constraints
+    for i in range(num_items):
+        solver.Add(solver.Sum(x[i, j] for j in range(max_bins)) == 1)
+    for j in range(max_bins):
+        solver.Add(solver.Sum(x[i, j] * items[i][0] for i in range(num_items)) <= bin_capacity * y[j])
+    for j in range(max_bins):
+        groups_in_bin = set(gid for _, gid in items)
+        for group_id in groups_in_bin:
+            solver.Add(solver.Sum(x[i, j] for i in range(num_items) if items[i][1] == group_id) <= 1)
+
+    solver.Minimize(solver.Sum(y[j] for j in range(max_bins)))
+
+    status = solver.Solve()
+    if status != pywraplp.Solver.OPTIMAL:
+        return None
+
+    bins = [[] for _ in range(max_bins)]
+    for i in range(num_items):
+        for j in range(max_bins):
+            if x[i, j].solution_value() > 0.5:
+                bins[j].append(items[i])
+                break
+
+    used_bins = [b for b in bins if b]
+    return used_bins
+
+def best_fit_with_group_constraint(item_groups, bin_capacity):
+    # Flatten item_groups into list of (size, group_id)
+    items = []
+    for group_id, group in enumerate(item_groups):
+        for item in group:
+            items.append((item, group_id))
+
+    # Sort items by size descending (Best Fit Decreasing)
+    items.sort(key=lambda x: -x[0])
+
+    bins = []
+
+    for item in items:
+        placed = False
+        for b in bins:
+            b_sum = sum(i[0] for i in b)
+            b_groups = {i[1] for i in b}
+            if b_sum + item[0] <= bin_capacity and item[1] not in b_groups:
+                b.append(item)
+                placed = True
+                break
+        if not placed:
+            bins.append([item])
+
+    return bins
+
+
+  
+def prepare_items(item_groups):
+    items = []
+    for gid, group in enumerate(item_groups):
+        for v in group:
+            items.append((v, gid))
+    return items
+
+def cp_bin_packing(item_groups, bin_capacity):
+    items = prepare_items(item_groups)
+    n = len(items)
+    max_bins = n
+
+    model = cp_model.CpModel()
+    bins = [model.NewIntVar(0, max_bins - 1, f'bin_{i}') for i in range(n)]
+
+    # At most one item from each group per bin
+    groups = set(g for _, g in items)
+    for group_id in groups:
+        indices = [i for i, (_, g) in enumerate(items) if g == group_id]
+        for i1 in range(len(indices)):
+            for i2 in range(i1 + 1, len(indices)):
+                model.Add(bins[indices[i1]] != bins[indices[i2]])
+
+    # Capacity constraints per bin
+    for b in range(max_bins):
+        in_bin = []
+        for i in range(n):
+            in_bin_var = model.NewBoolVar(f'in_bin_{i}_{b}')
+            model.Add(bins[i] == b).OnlyEnforceIf(in_bin_var)
+            model.Add(bins[i] != b).OnlyEnforceIf(in_bin_var.Not())
+            in_bin.append(in_bin_var)
+        model.Add(
+            sum(items[i][0] * in_bin[i] for i in range(n)) <= bin_capacity
+        )
+
+    # Minimize number of bins used
+    bin_used = [model.NewBoolVar(f'bin_used_{b}') for b in range(max_bins)]
+    for b in range(max_bins):
+        # Link bin_used[b] to whether any item is assigned to bin b
+        model.AddMaxEquality(bin_used[b], [model.NewBoolVar(f'item_{i}_in_bin_{b}') for i in range(n)])
+        # But to connect those vars, we reuse in_bin variables:
+        # We'll relax and just link bin_used[b] to OR of in_bin variables:
+        model.AddMaxEquality(bin_used[b], in_bin)
+
+    model.Minimize(sum(bin_used))
+
+    solver = cp_model.CpSolver()
+    status = solver.Solve(model)
+
+    if status in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+        result_bins = [[] for _ in range(max_bins)]
+        for i in range(n):
+            b = solver.Value(bins[i])
+            result_bins[b].append(items[i])
+        return [b for b in result_bins if b]
+    else:
+        return None
+    
+
+
+
+def generate_workload(target_sum, length):
+    # a = lower value in workload [a, a, ..., a+1, a+1]
+    # x = count of a
+    # y = count of a+1
+    # target_sum = nr of vms per workload
+    # length =  nr of nodes per workload
+    if length <= 0:
+        return []
+
+    a = target_sum // length      # floor division gives base value
+    remainder = target_sum % length  # how many need to be a+1
+
+    if a == 0:
+        return []
+
+    return [a + 1] * remainder + [a] * (length - remainder)
+
+
+def generate_test_case(nr_workloads, min_vms, max_vms, min_nodes, max_nodes):
+    all_workloads = []
+    for target_sum in range(min_vms, max_vms):  # nr of vms per workload
+        for length in range(min_nodes, max_nodes):   # nr of nodes per workload
+            arr = generate_workload(target_sum, length)
+            if len(arr):
+                all_workloads.append(arr)
+
+    # the distribution is uniform, we can modify this for certain values to have higher probabilities in the future
+    return [random.choice(all_workloads) for _ in range(nr_workloads)]
+
+
+   
+def print_bins(label, bins, show_items=True):
+    print(f"\n{label} solution: {len(bins)} bins")
+    for i, b in enumerate(bins):
+        vals = [v for v, _ in b]
+        if show_items:
+            print(f"  {label} Bin {i + 1}: items = {vals}, sum = {sum(vals)}")
+
+if __name__ == "__main__":
+
+    result = []
+
+    test_cases = []
+    for nr_workloads in range(10, 300, 10):
+        nr_iterations_per_workload = 5 # 5 times for each nr_worklaods to see different configurations
+
+        for test_iteration in range(nr_iterations_per_workload): 
+            bin_capacity = 32
+            min_vms = 2
+            max_vms = 12
+            min_nodes = 2
+            max_nodes = 8
+            test_workloads = generate_test_case(nr_workloads, min_vms, max_vms, min_nodes, max_nodes)
+            test_cases.append({"groups" : test_workloads, "bin_capacity" : bin_capacity, "test_iteration" : test_iteration})
+
+
+
+    for idx, case in enumerate(test_cases):
+        groups = case["groups"]
+        bin_capacity = case["bin_capacity"]
+
+
+        print(f"\n=== Test Case {idx} (Bin capacity = {bin_capacity}, nr_workloads = {len(groups)}, min_vms = {min_vms}, max_vms = {max_vms}, min_nodes = {min_nodes}, max_nodes = {max_nodes}) ===")
+
+        timeout_sec = 600  # Change as needed
+
+        start = time.time()
+        bf_bins = best_fit_with_group_constraint(groups, bin_capacity)
+        bf_time = time.time() - start
+
+        start = time.time()
+        cp_bins, cp_err = run_with_timeout(cp_bin_packing, args=(groups, bin_capacity), timeout=timeout_sec)
+        cp_time = time.time() - start
+
+
+        start = time.time()
+        ilp_bins, ilp_err = run_with_timeout(solve_bin_packing_ilp, args=(groups, bin_capacity), timeout=timeout_sec)
+        ilp_time = time.time() - start
+
+
+        print(f"Best Fit: bins used = {len(bf_bins)}, time = {bf_time:.4f}s")
+        print(f"CP      : bins used = {len(cp_bins) if cp_bins else 'No solution'}, time = {cp_time:.4f}s")
+        print(f"ILP     : bins used = {len(ilp_bins) if ilp_bins else 'No solution'}, time = {ilp_time:.4f}s")
+
+
+        result.append({"test_idx" : idx,
+                       "test_iteration" : case["test_iteration"],
+                       "nr_worloads": len(groups),
+                       "bin_capacity" : bin_capacity,
+                       "min_vms" : min_vms,
+                       "max_vms" : max_vms,
+                       "min_nodes" : min_nodes,
+                       "max_nodes" : max_nodes,
+                       "BestFit bins": len(bf_bins),
+                       "CP bins": len(cp_bins) if cp_bins else 'No solution',
+                       "ILP bins": len(ilp_bins) if ilp_bins else 'No solution',
+                       "BestFit time": f"{bf_time:.4f}s",
+                       "CP time": f"{cp_time:.4f}s",
+                       "ILP time": f"{ilp_time:.4f}s",
+                       "timeout_sec": timeout_sec
+                       })
+        
+        if idx % 1 == 0 and idx != 0:
+            print(result)
+            df = pd.DataFrame(result)
+            df.to_csv("testing_profiling.csv", index=False)
