@@ -19,16 +19,19 @@ pio.renderers.default = "browser"
 
 
 
-hamming_threshold = 1  
+hamming_threshold = 2
 first_frame = 0
 
 nr_neurons = 101
 nr_digits = 10
 activation = "sigmoid"
-nr_epochs_train = 50
+nr_epochs_train = 300
 
 try_nr = f'digits_{nr_digits}_nodes_{nr_neurons}_{activation}_epoc_{nr_epochs_train}'
 selected_layer = 0
+
+run_nr = 2
+
 
 # import tensorflow as tf
 # (x_train, y_train_mapped), (x_test, y_test) = tf.keras.datasets.mnist.load_data()
@@ -142,6 +145,88 @@ def compute_hamming_graph_lsh(labels, max_hamming=15, sample_rate=0.1):
     
     return G, labels
 
+def get_component_path_traces(components_prev_large, G_prev_large, clusters, move_labels_prev, x_coords_interp, y_coords_interp, colors_interp_all, opacity):
+    all_visited = set()
+    traces = []
+    #TODO IMPORTANT : are the large nodes (conn comp>3) that are in both frames the ones that don't change quad clusters???
+    for comp_idx, comp in enumerate(components_prev_large):
+        if len(comp) >= 2:  # Only plot paths for meaningful components
+            # Get subgraph for this component
+            subgraph = G_prev_large.subgraph(comp)
+            
+            # Generate path that covers all edges (Eulerian-like path)
+            edges = list(subgraph.edges())
+            if edges:
+                # Simple approach: create a path that visits all edges
+                # We'll traverse each edge at least once
+                path_nodes = []
+                visited_edges = set()
+                
+                # Start from any node
+                current_node = list(comp)[0]
+                path_nodes.append(current_node)
+                
+                while len(visited_edges) < len(edges):
+                    # Find an unvisited edge from current node
+                    found_edge = False
+                    for edge in edges:
+                        edge_tuple = tuple(sorted([edge[0], edge[1]]))
+                        if edge_tuple not in visited_edges:
+                            if edge[0] == current_node:
+                                path_nodes.append(edge[1])
+                                current_node = edge[1]
+                                visited_edges.add(edge_tuple)
+                                all_visited.add(edge_tuple)
+                                found_edge = True
+                                break
+                            elif edge[1] == current_node:
+                                path_nodes.append(edge[0])
+                                current_node = edge[0]
+                                visited_edges.add(edge_tuple)
+                                all_visited.add(edge_tuple)
+                                found_edge = True
+                                break
+                    
+                    if not found_edge:
+                        # Jump to a node that has unvisited edges
+                        for edge in edges:
+                            edge_tuple = tuple(sorted([edge[0], edge[1]]))
+                            if edge_tuple not in visited_edges:
+                                path_nodes.append(edge[0])
+                                current_node = edge[0]
+                                break
+                
+                # Convert path nodes (cluster labels) to actual sample indices and positions
+                path_indices = []
+                for node_label in path_nodes:
+                    if node_label in clusters and clusters[node_label]:
+                        # Take the first sample from each cluster as representative
+                        path_indices.append(clusters[node_label][0])
+                
+                if len(path_indices) > 1:
+                    # Get interpolated coordinates for each path node
+                    path_x = []
+                    path_y = []
+                    path_colors = []
+                    for node_label in path_nodes:
+                        idx = np.where(move_labels_prev == node_label)[0][0]  # Find index in interpolated arrays
+                        path_x.append(x_coords_interp[idx])
+                        path_y.append(y_coords_interp[idx])
+                        path_colors.append(colors_interp_all[idx])
+
+                    traces.append(go.Scatter(
+                        x=path_x,
+                        y=path_y,
+                        mode="lines",
+                        line=dict(
+                            width=2,
+                            color=path_colors[0]  # Use first color for the line
+                        ),
+                        showlegend=False,
+                        opacity=opacity
+                    ))
+    return traces, all_visited
+
 def plot_training_spacebent_all_smooth():
     
     global try_nr
@@ -161,20 +246,8 @@ def plot_training_spacebent_all_smooth():
 
     X_bent_output_layers_0 = {}
     
-    h5_filepath = f"trainings2\\training_digits_{try_nr}\\X_bent_output_layers_{layer_nr}.h5"
-    if os.path.exists(h5_filepath):
-        with h5py.File(h5_filepath, 'r') as f:
-            X_latent = np.array(f['data'])
-    
-    h5_filepath_1 = f"trainings2\\training_digits_{try_nr}\\X_bent_output_layers_1.h5"
-    if os.path.exists(h5_filepath_1):
-        with h5py.File(h5_filepath_1, 'r') as f:
-            X_pred = np.array(f['data'])
-    
-
-
-   # X_latent = np.load(f'trainings2\\training_digits_{try_nr}\\X_bent_output_layers_{layer_nr}.npy')
-   # X_pred = np.load(f'trainings2\\training_digits_{try_nr}\\X_bent_output_layers_{predict_layer}.npy')
+    X_latent = np.load(f'trainings2\\training_digits_{try_nr}\\X_bent_output_layers_{layer_nr}.npy')
+    X_pred = np.load(f'trainings2\\training_digits_{try_nr}\\X_bent_output_layers_{predict_layer}.npy')
     accuracies = np.load(f'trainings2\\training_digits_{try_nr}\\accuracy.npy')
 
     random_points = sigmoid_force_quad(np.random.uniform(-15, 15 ,  (100000, X_latent[0].shape[1])))
@@ -210,22 +283,39 @@ def plot_training_spacebent_all_smooth():
     frame_nr = 0
     skip_smooth_interval = 1
     
-    animation_folder_path = f"animations2\\latent_graph\\{try_nr}_{skip_smooth_interval}"# nr_interp_frames, skip_step
+    animation_folder_path = f"animations2\\latent_graph\\{try_nr}"# nr_interp_frames, skip_step
     if not os.path.isdir(animation_folder_path):
         os.makedirs(animation_folder_path)
 
     
-    if not os.path.isdir(f"{animation_folder_path}\\layer_nr{layer_nr}"):
-        os.makedirs(f"{animation_folder_path}\\layer_nr{layer_nr}")
+    if not os.path.isdir(f"{animation_folder_path}\\layer_nr{layer_nr}_hamm_{hamming_threshold}_{run_nr}"):
+        os.makedirs(f"{animation_folder_path}\\layer_nr{layer_nr}_hamm_{hamming_threshold}_{run_nr}")
         
         
-    for ii in range(first_frame, len(X_latent), skip_smooth_interval):
-        print(ii)
 
+    # Get global min/max coordinates for consistent axis ranges
+    def get_axis_ranges():
+        all_x_coords = []
+        all_y_coords = []
+        for i in range(first_frame, len(X_latent)):
+            X_latent_frame = X_latent[i][::4]
+            if activation == "sigmoid":
+                X_latent_frame = sigmoid_force_quad(X_latent_frame-0.5)
+            elif activation == "relu":
+                X_latent_frame = sigmoid_force_quad(X_latent_frame)
+            coords = trained_pca.transform(X_latent_frame)
+            all_x_coords.extend(coords[:, 0])
+            all_y_coords.extend(coords[:, 1])
+        return {
+            'xmin': min(all_x_coords),
+            'xmax': max(all_x_coords),
+            'ymin': min(all_y_coords),
+            'ymax': max(all_y_coords)
+        }
 
-        angle_ = frame_nr * degrees_per_iter * np.pi/180
-    
-        
+    axis_ranges = get_axis_ranges()
+
+    def get_graph_data(ii):
         X_latent_ii = X_latent[ii][::4]
         X_pred_ii = X_pred[ii][::4]
 
@@ -233,8 +323,6 @@ def plot_training_spacebent_all_smooth():
             X_latent_ii = sigmoid_force_quad(X_latent_ii-0.5)
         elif activation == "relu":
             X_latent_ii = sigmoid_force_quad(X_latent_ii)
-
-
 
 
         X_latent_pca = trained_pca.transform(X_latent_ii)
@@ -247,7 +335,7 @@ def plot_training_spacebent_all_smooth():
 
         label_list = list(labels)
         G_indices, _ = compute_hamming_graph_lsh(label_list, max_hamming=hamming_threshold, sample_rate=0.2)
-                
+
         # Convert to label-based graph
         G = nx.Graph()
         for node in G_indices.nodes():
@@ -256,180 +344,453 @@ def plot_training_spacebent_all_smooth():
         for u, v in G_indices.edges():
             G.add_edge(label_list[u], label_list[v])
 
-
-
         components = list(nx.connected_components(G))
         # Filter to only meaningful components (>2 nodes)
-        meaningful_components = [comp for comp in components if len(comp) > 2]
-
-
- 
-
-
-
-
-
-
-
-
-        fig_layer = go.Figure()
-
-
+        #meaningful_components = [comp for comp in components if len(comp) > 2]
 
         # Separate indices for clusters >=3 and <=3
-        large_cluster_indices = []
-        small_cluster_indices = []
+        large_cluster_labels = []
+        small_cluster_labels = []
         for comp in components:
-            if len(comp) >= 3:
+            if len(comp) >= 2:
                 # Get actual sample indices from clusters, not cluster labels
                 for cluster_label in comp:
                     if cluster_label in clusters:
-                        large_cluster_indices.extend(clusters[cluster_label])
+                        large_cluster_labels.append(cluster_label)
             else:
                 # Get actual sample indices from clusters, not cluster labels
                 for cluster_label in comp:
                     if cluster_label in clusters:
-                        small_cluster_indices.extend(clusters[cluster_label])
+                        small_cluster_labels.append(cluster_label)
 
-        # Plot large clusters (size 2, opacity 0.9)
-        if large_cluster_indices:
+
+        map_quadr_label_to_coords = {}
+        map_quadr_label_to_colors = {}
+        for cluster_label in clusters:
+        
+            labels_in_cluster = np.array(X_pred_label)[clusters[cluster_label]]
+            most_common_label = np.bincount(labels_in_cluster).argmax()
+            map_quadr_label_to_coords[cluster_label] = X_latent_pca[clusters[cluster_label][0]] # TODO check all are equal
+            map_quadr_label_to_colors[cluster_label] = digit_colors[most_common_label]
+
+
+        return clusters, label_list, G_indices, X_latent_pca, X_pred_label, np.array(large_cluster_labels), np.array(small_cluster_labels), G, components, map_quadr_label_to_coords, map_quadr_label_to_colors
+
+
+    def get_move_mapping(clusters_prev, clusters):
+
+        item_to_label_map = {}
+        for label in clusters:
+            for item_index in clusters[label]:
+                item_to_label_map[item_index] = label
+
+        move_mapping = {label_prev : {} for label_prev in clusters_prev} # all will have moves from them
+        move_mapping_items = {label_prev : {} for label_prev in clusters_prev}
+        for label_prev in clusters_prev:
+
+            #within a quad cluster
+            for item_index_prev in clusters_prev[label_prev]:
+                label_next = item_to_label_map[item_index_prev]
+                if label_next not in move_mapping[label_prev]:
+                    move_mapping[label_prev][label_next] = 0
+                    move_mapping_items[label_prev][label_next] = []
+                move_mapping[label_prev][label_next] += 1
+                move_mapping_items[label_prev][label_next].append(item_index_prev)
+
+        return move_mapping, move_mapping_items
+
+
+    
+    clusters_prev, label_list_prev, G_indices_prev, X_latent_pca_prev, X_pred_label_prev, large_cluster_labels_prev, small_cluster_labels_prev, G_prev, components_prev, map_quadr_label_to_coords_prev, map_quadr_label_to_colors_prev = get_graph_data(first_frame)
+
+
+    for ii in range(first_frame+1, len(X_latent), skip_smooth_interval):
+        print(ii)
+
+        clusters, label_list, G_indices, X_latent_pca, X_pred_label, large_cluster_labels, small_cluster_labels, G, components, map_quadr_label_to_coords, map_quadr_label_to_colors = get_graph_data(ii)
+        
+                
+
+        move_mapping_counts, move_mapping_items = get_move_mapping(clusters_prev, clusters)
+
+
+        x_coords_prev = []
+        y_coords_prev = []
+        x_coords = []
+        y_coords = []
+        move_labels = []
+        move_labels_prev = []
+        colors_arr_prev = []
+        colors_arr = []
+
+        for prev_label in move_mapping_counts:
+            for next_label in move_mapping_counts[prev_label]:
+                x_coords_prev.append(map_quadr_label_to_coords_prev[prev_label][0])
+                y_coords_prev.append(map_quadr_label_to_coords_prev[prev_label][1])
+                
+                x_coords.append(map_quadr_label_to_coords[next_label][0])
+                y_coords.append(map_quadr_label_to_coords[next_label][1])
+
+                move_labels.append(next_label)
+                move_labels_prev.append(prev_label)
+                
+                colors_arr_prev.append(map_quadr_label_to_colors_prev[prev_label])
+                colors_arr.append(map_quadr_label_to_colors[next_label])
+
+
+        
+        x_coords_prev = np.array(x_coords_prev)
+        y_coords_prev = np.array(y_coords_prev)
+        x_coords = np.array(x_coords)
+        y_coords = np.array(y_coords)
+        move_labels = np.array(move_labels)
+        move_labels_prev = np.array(move_labels_prev)
+        colors_arr_prev = np.array(colors_arr_prev)
+        colors_arr = np.array(colors_arr)
+        
+
+
+
+
+        large_cluster_mask = np.isin(move_labels_prev, large_cluster_labels_prev) & np.isin(move_labels, large_cluster_labels)
+        x_coords_prev_large = x_coords_prev[large_cluster_mask]
+        y_coords_prev_large = y_coords_prev[large_cluster_mask]
+        x_coords_large = x_coords[large_cluster_mask]
+        y_coords_large = y_coords[large_cluster_mask]
+        colors_prev_large = colors_arr_prev[large_cluster_mask]
+
+
+
+
+        nr_fade_out_frames = 5
+        nr_move_frames = 15
+        nr_fade_in_frames = 5
+
+
+        # prev are large, new are small
+        
+        fade_out_masks = np.isin(move_labels_prev, large_cluster_labels_prev) & np.isin(move_labels, small_cluster_labels)
+        x_coords_fade_out = x_coords_prev[fade_out_masks]
+        y_coords_fade_out = y_coords_prev[fade_out_masks]
+        colors_fade_out = colors_arr_prev[fade_out_masks]
+        
+
+        fade_in_masks = np.isin(move_labels_prev, small_cluster_labels_prev) & np.isin(move_labels, large_cluster_labels)
+        x_coords_fade_in = x_coords[fade_in_masks]
+        y_coords_fade_in = y_coords[fade_in_masks]
+        colors_fade_in = colors_arr_prev[fade_in_masks]
+
+
+        small_cluster_mask = (~large_cluster_mask) & (~fade_out_masks) & (~fade_in_masks)
+        x_coords_prev_small = x_coords_prev[small_cluster_mask]
+        y_coords_prev_small = y_coords_prev[small_cluster_mask]
+        x_coords_small = x_coords[small_cluster_mask]
+        y_coords_small = y_coords[small_cluster_mask]
+        colors_prev_small = colors_arr_prev[small_cluster_mask]
+
+
+      #  fade_out_masks = []
+
+        # colors_fade_out = []
+        # for prev_label in move_mapping_counts:
+        #     for next_label in move_mapping_counts[prev_label]:
+        #         if prev_label in large_cluster_labels_prev and next_label in small_cluster_labels:
+        #             fade_out_masks.append(True)
+        #         else:
+        #             fade_out_masks.append(False)
+
+
+        # fade_out_masks = np.array(fade_out_masks)
+        # x_coords_fade_out = x_coords[fade_out_masks]
+        # y_coords_fade_out = y_coords[fade_out_masks]
+        # colors_fade_out = colors_arr[fade_out_masks]
+
+
+        # fade_in_masks = []
+
+        # colors_fade_in = []
+        # for prev_label in move_mapping_counts:
+        #     for next_label in move_mapping_counts[prev_label]:
+        #         if prev_label in small_cluster_labels_prev and next_label in large_cluster_labels:
+        #             fade_in_masks.append(True)
+        #         else:
+        #             fade_in_masks.append(False)
+
+
+        # fade_in_masks = np.array(fade_in_masks)
+        # x_coords_fade_in = x_coords[fade_in_masks]
+        # y_coords_fade_in = y_coords[fade_in_masks]
+        # colors_fade_in = colors_arr[fade_in_masks]
+    
+
+        large_cluster_labels_prev_filtered = move_labels_prev[large_cluster_mask]
+
+        set_clusters_labels_prev = set(large_cluster_labels_prev_filtered)
+
+        
+                                            
+        G_prev_large = G_prev.subgraph(np.unique(large_cluster_labels_prev_filtered))
+        components_prev_large = list(nx.connected_components(G_prev_large))
+
+        set_clusters_labels_next = set(move_labels)
+
+
+
+        for nr_interp_frame in range(nr_move_frames):
+
+
+           
+            t = nr_interp_frame/(nr_move_frames-1)
+            size = 4 + (8-4) * t
+
+            
+            # Interpolate colors by converting hex to rgb, interpolating, then back to hex
+            def interpolate_colors(color1_arr, color2_arr, t):
+                # Convert hex to RGB arrays
+                rgb1_arr = np.array([int(c[1:3], 16) for c in color1_arr]), np.array([int(c[3:5], 16) for c in color1_arr]), np.array([int(c[5:7], 16) for c in color1_arr])
+                rgb2_arr = np.array([int(c[1:3], 16) for c in color2_arr]), np.array([int(c[3:5], 16) for c in color2_arr]), np.array([int(c[5:7], 16) for c in color2_arr])
+                
+                # Interpolate RGB values
+                rgb_interp = tuple(np.round((1-t) * rgb1 + t * rgb2).astype(int) for rgb1, rgb2 in zip(rgb1_arr, rgb2_arr))
+                
+                # Convert back to hex
+                return np.array(['#' + ''.join(f'{c:02x}' for c in rgb) for rgb in zip(*rgb_interp)])
+
+            # Interpolate colors for all three sets
+            colors_fade_in_interp = interpolate_colors(colors_arr_prev[fade_in_masks], colors_arr[fade_in_masks], t)
+            colors_large_interp = interpolate_colors(colors_prev_large, colors_arr[large_cluster_mask], t)
+            colors_small_interp = interpolate_colors(colors_arr_prev[small_cluster_mask], colors_arr[small_cluster_mask], t)
+            colors_interp_all = interpolate_colors(colors_arr_prev, colors_arr, t)
+
+
+
+            fig_layer = go.Figure()
+
+
+
+            x_coords_interp_large = x_coords_prev_large + (x_coords_large - x_coords_prev_large) * nr_interp_frame/(nr_move_frames-1)
+            y_coords_interp_large = y_coords_prev_large + (y_coords_large - y_coords_prev_large) * nr_interp_frame/(nr_move_frames-1)
+            
+
+            
+            x_coords_interp_small = x_coords_prev_small + (x_coords_small - x_coords_prev_small) * nr_interp_frame/(nr_move_frames-1)
+            y_coords_interp_small = y_coords_prev_small + (y_coords_small - y_coords_prev_small) * nr_interp_frame/(nr_move_frames-1)
+            
+
+
+
+            x_coords_interp = x_coords_prev + (x_coords - x_coords_prev) * nr_interp_frame/(nr_move_frames-1)
+            y_coords_interp = y_coords_prev + (y_coords - y_coords_prev) * nr_interp_frame/(nr_move_frames-1)
+
+
+
             fig_layer.add_trace(go.Scatter(
                 name="large clusters",
-                x=X_latent_pca[large_cluster_indices, 0],
-                y=X_latent_pca[large_cluster_indices, 1],
+                x=x_coords_interp_large,
+                y=y_coords_interp_large,
                 mode="markers",
                 marker=dict(
                     size=8,
                     opacity=0.7,
-                    color=[digit_colors[label] for label in np.array(X_pred_label)[large_cluster_indices]],
+                    color=colors_large_interp,
                     line=dict(width=0.5, color='white')
                 ),
                 showlegend=False
             ))
 
-        # Plot small clusters (size 1, opacity 0.3)
-        if small_cluster_indices:
+
+
             fig_layer.add_trace(go.Scatter(
                 name="small clusters",
-                x=X_latent_pca[small_cluster_indices, 0],
-                y=X_latent_pca[small_cluster_indices, 1],
+                x=x_coords_interp_small,
+                y=y_coords_interp_small,
                 mode="markers",
                 marker=dict(
                     size=4,
                     opacity=0.3,
-                    color=[digit_colors[label] for label in np.array(X_pred_label)[small_cluster_indices]],
-                  #  line=dict(width=0.2, color='white')
+                    color=colors_small_interp,
+                #  line=dict(width=0.2, color='white')
                 ),
                 showlegend=False
             ))
 
-        # Generate and plot paths for each connected component
-        for comp_idx, comp in enumerate(components):
-            if len(comp) >= 3:  # Only plot paths for meaningful components
-                # Get subgraph for this component
-                subgraph = G.subgraph(comp)
-                
-                # Generate path that covers all edges (Eulerian-like path)
-                edges = list(subgraph.edges())
-                if edges:
-                    # Simple approach: create a path that visits all edges
-                    # We'll traverse each edge at least once
-                    path_nodes = []
-                    visited_edges = set()
+            
+
+
+
+
+            # traces, all_visited = get_component_path_traces(components_prev_large, G_prev_large, clusters, move_labels_prev, 
+            #                                               x_coords_interp, y_coords_interp, colors_interp_all, 0.5)
+            # for trace in traces:
+            #     fig_layer.add_trace(trace)
+
+
+            for edge in G_prev.edges():
+                edge_tuple = tuple(sorted([edge[0], edge[1]]))
+                if tuple([edge[0], edge[1]]) in list(G.edges()) or tuple([edge[1], edge[0]]) in list(G.edges()):
+
                     
-                    # Start from any node
-                    current_node = list(comp)[0]
-                    path_nodes.append(current_node)
-                    
-                    while len(visited_edges) < len(edges):
-                        # Find an unvisited edge from current node
-                        found_edge = False
-                        for edge in edges:
-                            edge_tuple = tuple(sorted([edge[0], edge[1]]))
-                            if edge_tuple not in visited_edges:
-                                if edge[0] == current_node:
-                                    path_nodes.append(edge[1])
-                                    current_node = edge[1]
-                                    visited_edges.add(edge_tuple)
-                                    found_edge = True
-                                    break
-                                elif edge[1] == current_node:
-                                    path_nodes.append(edge[0])
-                                    current_node = edge[0]
-                                    visited_edges.add(edge_tuple)
-                                    found_edge = True
-                                    break
-                        
-                        if not found_edge:
-                            # Jump to a node that has unvisited edges
-                            for edge in edges:
-                                edge_tuple = tuple(sorted([edge[0], edge[1]]))
-                                if edge_tuple not in visited_edges:
-                                    path_nodes.append(edge[0])
-                                    current_node = edge[0]
-                                    break
-                    
-                    # Convert path nodes (cluster labels) to actual sample indices and positions
-                    path_indices = []
-                    for node_label in path_nodes:
-                        if node_label in clusters and clusters[node_label]:
-                            # Take the first sample from each cluster as representative
-                            path_indices.append(clusters[node_label][0])
-                    
-                    if len(path_indices) > 1:
-                        # Get positions and colors for the path
-                        path_positions = X_latent_pca[path_indices]
-                        path_colors = [digit_colors[label] for label in np.array(X_pred_label)[path_indices]]
-                        
-                        # Plot the path as a line trace
-                        fig_layer.add_trace(go.Scatter(
-                            name=f"component_{comp_idx}_path",
-                            x=path_positions[:, 0],
-                            y=path_positions[:, 1],
-                            mode="lines",
-                            line=dict(
-                                width=2,
-                                color=path_colors[0]  # Use first color for the line
-                            ),
-                            marker=dict(
-                                size=2,
-                                color=path_colors
-                            ),
-                            showlegend=False,
-                            opacity=0.5
-                        ))
 
-       
-        #add lines here
+                    idx_0 = np.where(move_labels_prev == edge_tuple[0])[0][0]  # get first match
+                    idx_1 = np.where(move_labels_prev == edge_tuple[1])[0][0]  # get first match
+
+
+                    fig_layer.add_trace(go.Scatter(
+                        x=[x_coords_interp[idx_0], x_coords_interp[idx_1]],
+                        y=[y_coords_interp[idx_0], y_coords_interp[idx_1]],
+                        mode="lines",
+                        line=dict(
+                            width=2,
+                            color= map_quadr_label_to_colors_prev[edge_tuple[0]]  # Use first color for the line. it's fading out anyway
+                        ),
+
+                        showlegend=False,
+                        opacity=0.5
+                    ))
 
 
 
 
 
 
-        #fig_layer.add_trace(go.Scatter(name = "sigmoid space", x=X_latent_pca[:,0], y=X_latent_pca[:,1], mode = "markers", marker = dict(opacity=0.7, size = 1, color=X_pred_label,colorscale='rainbow')))
+            #fig_layer.add_trace(go.Scatter(name = "sigmoid space", x=X_latent_pca[:,0], y=X_latent_pca[:,1], mode = "markers", marker = dict(opacity=0.7, size = 1, color=X_pred_label,colorscale='rainbow')))
 
-        # Remove 3D camera settings for 2D plot
-        fig_layer.update_layout( template = "plotly_dark", width = 2200, height = 1400)
-        fig_layer.update_layout( title = f"frame {ii}, hamm thr: {hamming_threshold}")
-        fig_layer.update_coloraxes(showscale=False)
-        
-        # Remove grid from axes
-        fig_layer.update_xaxes(showgrid=False)
-        fig_layer.update_yaxes(showgrid=False)
-        
-        # Remove axis numbers, ticks, and zero lines
-        fig_layer.update_xaxes(showticklabels=False, showline=False, zeroline=False, ticks="")
-        fig_layer.update_yaxes(showticklabels=False, showline=False, zeroline=False, ticks="")
+            # Remove 3D camera settings for 2D plot
+            fig_layer.update_layout(
+                template="plotly_dark",
+                width=2200,
+                height=1400,
+                title=f"frame {ii}, hamm thr: {hamming_threshold}",
+                xaxis=dict(
+                    showgrid=False,
+                    showticklabels=False,
+                    showline=False,
+                    zeroline=False,
+                    ticks="",
+                    range=[axis_ranges['xmin'], axis_ranges['xmax']]
+                ),
+                yaxis=dict(
+                    showgrid=False,
+                    showticklabels=False,
+                    showline=False,
+                    zeroline=False,
+                    ticks="",
+                    range=[axis_ranges['ymin'], axis_ranges['ymax']]
+                )
+            )
+            fig_layer.update_coloraxes(showscale=False)
 
 
-        fig_layer.write_image(f"{animation_folder_path}\\layer_nr{layer_nr}\\image_{frame_nr:05}.png")
 
-        
-       # print("framenr", frame_nr)
-       # fig_layer.show()
-       # exit()
-        frame_nr+=1
+
+
+            ###########FADE OUT############
+            size = 8 + (4-8) * nr_interp_frame/(nr_move_frames-1)
+
+
+            fig_layer.add_trace(go.Scatter( # interp ones
+                name="large clusters",
+                x=x_coords_interp[fade_out_masks],
+                y=y_coords_interp[fade_out_masks],
+                mode="markers",
+                marker=dict(
+                    size=size,
+                    opacity=0.7,
+                    color=colors_fade_out,
+                ),
+                showlegend=False
+            ))
+
+
+
+            interp_opacity = 0.5 + (0-0.5) * nr_interp_frame/(nr_move_frames-1)
+
+
+            nr_fade_out_edge = 0
+            for edge in G_prev.edges():
+                edge_tuple = tuple(sorted([edge[0], edge[1]]))
+                if tuple([edge[0], edge[1]]) not in list(G.edges()) and tuple([edge[1], edge[0]]) not in list(G.edges()):
+
+                    nr_fade_out_edge+=1
+
+                    idx_0 = np.where(move_labels_prev == edge_tuple[0])[0][0]  # get first match
+                    idx_1 = np.where(move_labels_prev == edge_tuple[1])[0][0]  # get first match
+
+
+                    fig_layer.add_trace(go.Scatter(
+                        x=[x_coords_interp[idx_0], x_coords_interp[idx_1]],
+                        y=[y_coords_interp[idx_0], y_coords_interp[idx_1]],
+                        mode="lines",
+                        line=dict(
+                            width=2,
+                            color= map_quadr_label_to_colors_prev[edge_tuple[0]]  # Use first color for the line. it's fading out anyway
+                        ),
+
+                        showlegend=False,
+                        opacity=interp_opacity
+                    ))
+
+
+
+            ##########FADE IN ##########
+
+            size = 4 + (8-4) * t
+
+            fig_layer.add_trace(go.Scatter(
+                name="large clusters",
+                x=x_coords_interp[fade_in_masks],
+                y=y_coords_interp[fade_in_masks],
+                mode="markers",
+                marker=dict(
+                    size=size,
+                    opacity=0.7,
+                    color=colors_fade_in_interp,
+                    line=dict(width=0.5, color='white')
+                ),
+                showlegend=False
+            ))
+
+
+
+            interp_opacity = 0 + (0.5 - 0) * nr_interp_frame/(nr_move_frames-1)
+
+            for edge in G.edges():
+                edge_tuple = tuple(sorted([edge[0], edge[1]]))
+                if tuple([edge[0], edge[1]]) not in list(G_prev.edges()) and tuple([edge[1], edge[0]]) not in list(G_prev.edges()):
+
+
+                    idx_0 = np.where(move_labels == edge_tuple[0])[0][0]  # get first match
+                    idx_1 = np.where(move_labels == edge_tuple[1])[0][0]  # get first match
+
+
+                    fig_layer.add_trace(go.Scatter(
+                        x=[x_coords_interp[idx_0], x_coords_interp[idx_1]],
+                        y=[y_coords_interp[idx_0], y_coords_interp[idx_1]],
+                        mode="lines",
+                        line=dict(
+                            width=2,
+                            color= map_quadr_label_to_colors[edge_tuple[0]]  # Use first color for the line
+                        ),
+
+                        showlegend=False,
+                        opacity=interp_opacity
+                    ))
+
+
+
+
+
+
+
+            fig_layer.write_image(f"{animation_folder_path}\\layer_nr{layer_nr}_hamm_{hamming_threshold}_{run_nr}\\image_{frame_nr:05}.png")
+
+            frame_nr+=1
+
+
+
+
+
+        clusters_prev, label_list_prev, G_indices_prev, X_latent_pca_prev, X_pred_label_prev, large_cluster_labels_prev, small_cluster_labels_prev, G_prev, components_prev, map_quadr_label_to_coords_prev, map_quadr_label_to_colors_prev = clusters, label_list, G_indices, X_latent_pca, X_pred_label, large_cluster_labels, small_cluster_labels, G, components, map_quadr_label_to_coords, map_quadr_label_to_colors
 
 
 
@@ -437,7 +798,5 @@ def plot_training_spacebent_all_smooth():
 
 plot_training_spacebent_all_smooth()
 
-
-plot_training_spacebent_all_smooth()
 
 
