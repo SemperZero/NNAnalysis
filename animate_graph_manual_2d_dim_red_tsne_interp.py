@@ -20,8 +20,8 @@ pio.renderers.default = "browser"
 
 
 
-hamming_threshold = 4
-first_frame = 10
+hamming_threshold = 5
+first_frame = 20
 
 nr_neurons = 101
 nr_digits = 10
@@ -31,12 +31,13 @@ nr_epochs_train = 300
 try_nr = f'digits_{nr_digits}_nodes_{nr_neurons}_{activation}_epoc_{nr_epochs_train}'
 selected_layer = 0
 
-run_nr = 12
+run_nr = 16
 
 nr_tsne_frames = 30
 
-selected_digit = 1
+selected_digit = 8
 
+nr_move_frames = 5
 
 import tensorflow as tf
 (x_train, y_train_mapped), (x_test, y_test) = tf.keras.datasets.mnist.load_data()
@@ -316,8 +317,9 @@ def plot_training_spacebent_all_smooth():
         os.makedirs(animation_folder_path)
 
     
-    if not os.path.isdir(f"{animation_folder_path}\\layer_nr{layer_nr}_hamm_{hamming_threshold}_dig_{selected_digit}_{run_nr}"):
-        os.makedirs(f"{animation_folder_path}\\layer_nr{layer_nr}_hamm_{hamming_threshold}_dig_{selected_digit}_{run_nr}")
+    layer_folder_path = f"{animation_folder_path}\\layer_nr{layer_nr}_hamm_{hamming_threshold}_dig_{selected_digit}_{run_nr}"
+    if not os.path.isdir(layer_folder_path):
+        os.makedirs(layer_folder_path)
         
         
 
@@ -492,7 +494,7 @@ def plot_training_spacebent_all_smooth():
 
 
         nr_fade_out_frames = 5
-        nr_move_frames = 15
+        
         nr_fade_in_frames = 5
 
 
@@ -664,38 +666,54 @@ def plot_training_spacebent_all_smooth():
             def get_line_width_opac(dist):
                 if dist == 1:
                     line_width = 2
-                    opacity = 0.75
+                    opacity = 0.4
                 elif dist == 2:
                     line_width = 1
-                    opacity = 0.5
+                    opacity = 0.25
                 else:  # dist == 3
                     line_width = 0.5
-                    opacity = 0.3
+                    opacity = 0.15
                 return line_width, opacity
 
-            for edge in G_prev.edges():
-                edge_tuple = tuple(sorted([edge[0], edge[1]]))
-                if tuple([edge[0], edge[1]]) in list(G.edges()) or tuple([edge[1], edge[0]]) in list(G.edges()):
+            print("start add traces", len(G_prev.edges()))
 
-                    width_prev, opacity_prev = get_line_width_opac(edge_distances_prev.get((edge[0], edge[1])))
-                    width_next, opacity_next = get_line_width_opac(edge_distances.get((edge[0], edge[1])))
+            G_edges = set(list(G.edges()))
+            G_prev_edges = set(list(G_prev.edges()))
+
+            for edge in G_prev.edges():
+                idx_0 = np.where(move_labels_prev == edge[0])[0][0]  # get first match
+                idx_1 = np.where(move_labels_prev == edge[1])[0][0]  # get first match
+
+                label_prev_0 = move_labels_prev[idx_0]
+                label_next_0 = move_labels[idx_0]
+                if label_prev_0 != edge[0]:
+                    print(label_prev_0, edge[0], "label_prev_0")
+                    exit()
+
+                label_prev_1 = move_labels_prev[idx_1]
+                label_next_1 = move_labels[idx_1]
+
+                if label_prev_1 != edge[1]:
+                    print(label_prev_1, edge[1], "label_prev_1")
+                    exit()
+
+                if tuple([label_next_0, label_next_1]) in G_edges or tuple([label_next_1, label_next_0]) in G_edges:
+
+
+                    width_prev, opacity_prev = get_line_width_opac(edge_distances_prev.get((label_prev_0, label_prev_1)))
+                    width_next, opacity_next = get_line_width_opac(edge_distances.get((label_next_0, label_next_1)))
                 
                     line_width = width_prev + (width_next - width_prev) * nr_interp_frame / (nr_move_frames - 1)
                     opacity = opacity_prev + (opacity_next - opacity_prev) * nr_interp_frame / (nr_move_frames - 1)
 
-
-
-                    idx_0 = np.where(move_labels_prev == edge_tuple[0])[0][0]  # get first match
-                    idx_1 = np.where(move_labels_prev == edge_tuple[1])[0][0]  # get first match
-
-
                     fig_layer.add_trace(go.Scatter(
+                        
                         x=[x_coords_interp[idx_0], x_coords_interp[idx_1]],
                         y=[y_coords_interp[idx_0], y_coords_interp[idx_1]],
                         mode="lines",
                         line=dict(
                             width=line_width,
-                            color= map_quadr_label_to_colors_prev[edge_tuple[0]]  # Use first color for the line. it's fading out anyway
+                            color= map_quadr_label_to_colors_prev[move_labels_prev[idx_0]]
                         ),
 
                         showlegend=False,
@@ -756,26 +774,24 @@ def plot_training_spacebent_all_smooth():
             # ))
 
 
-
-            
-
-
             nr_fade_out_edge = 0
             for edge in G_prev.edges():
-                edge_tuple = tuple(sorted([edge[0], edge[1]]))
-                if tuple([edge[0], edge[1]]) not in list(G.edges()) and tuple([edge[1], edge[0]]) not in list(G.edges()):
+                idx_0 = np.where(move_labels_prev == edge[0])[0][0]  # get first match
+                idx_1 = np.where(move_labels_prev == edge[1])[0][0]  # get first match
 
+                label_prev_0 = move_labels_prev[idx_0]
+                label_next_0 = move_labels[idx_0]
+
+                label_prev_1 = move_labels_prev[idx_1]
+                label_next_1 = move_labels[idx_1]
+
+
+                if tuple([label_next_0, label_next_1]) not in G_edges and tuple([label_next_1, label_next_0]) not in G_edges:
                     nr_fade_out_edge+=1
 
 
                     line_width_prev, opacity_prev = get_line_width_opac(edge_distances_prev.get((edge[0], edge[1])))
-                   
-
                     interp_opacity = opacity_prev + (0-opacity_prev) * nr_interp_frame/(nr_move_frames-1)
-
-
-                    idx_0 = np.where(move_labels_prev == edge_tuple[0])[0][0]  # get first match
-                    idx_1 = np.where(move_labels_prev == edge_tuple[1])[0][0]  # get first match
 
 
                     fig_layer.add_trace(go.Scatter(
@@ -784,7 +800,7 @@ def plot_training_spacebent_all_smooth():
                         mode="lines",
                         line=dict(
                             width=line_width_prev,
-                            color= map_quadr_label_to_colors_prev[edge_tuple[0]]  # Use first color for the line. it's fading out anyway
+                            color= map_quadr_label_to_colors_prev[move_labels_prev[idx_0]]  # Use first color for the line. it's fading out anyway
                         ),
 
                         showlegend=False,
@@ -812,21 +828,24 @@ def plot_training_spacebent_all_smooth():
             # ))
 
 
-
-            
-
             for edge in G.edges():
-                edge_tuple = tuple(sorted([edge[0], edge[1]]))
-                if tuple([edge[0], edge[1]]) not in list(G_prev.edges()) and tuple([edge[1], edge[0]]) not in list(G_prev.edges()):
+                idx_0 = np.where(move_labels == edge[0])[0][0]  # get first match
+                idx_1 = np.where(move_labels == edge[1])[0][0]  # get first match
+
+                label_prev_0 = move_labels_prev[idx_0]
+                label_next_0 = move_labels[idx_0]
+
+                label_prev_1 = move_labels_prev[idx_1]
+                label_next_1 = move_labels[idx_1]
+
+
+                if tuple([label_prev_0, label_prev_1]) not in G_prev_edges and tuple([label_prev_1, label_prev_0]) not in G_prev_edges:
+
 
                     line_width, opacity = get_line_width_opac(edge_distances.get((edge[0], edge[1])))
 
 
                     interp_opacity = 0 + (opacity - 0) * nr_interp_frame/(nr_move_frames-1)
-
-                    idx_0 = np.where(move_labels == edge_tuple[0])[0][0]  # get first match
-                    idx_1 = np.where(move_labels == edge_tuple[1])[0][0]  # get first match
-
 
                     fig_layer.add_trace(go.Scatter(
                         x=[x_coords_interp[idx_0], x_coords_interp[idx_1]],
@@ -834,7 +853,7 @@ def plot_training_spacebent_all_smooth():
                         mode="lines",
                         line=dict(
                             width=line_width,
-                            color= map_quadr_label_to_colors[edge_tuple[0]]  # Use first color for the line
+                            color= map_quadr_label_to_colors[move_labels[idx_0]]  # Use first color for the line
                         ),
 
                         showlegend=False,
@@ -844,7 +863,7 @@ def plot_training_spacebent_all_smooth():
 
 
 
-            save_path = f"{animation_folder_path}\\layer_nr{layer_nr}_hamm_{hamming_threshold}_dig_{selected_digit}_{run_nr}\\image_{frame_nr:05}.png"
+            save_path = f"{layer_folder_path}\\image_{frame_nr:05}.png"
 
             print(save_path)
             fig_layer.write_image(save_path)
